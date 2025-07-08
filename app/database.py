@@ -4,7 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MONGO_URI = "mongodb+srv://urbano:ur.dbMongoDB@cluster0.avnsluf.mongodb.net"
+MONGO_URI = "mongodb+srv://urbano:ur.dbMongoDB@cluster0.avnsluf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 DB_NAME = "blog_db"
 
 client = AsyncIOMotorClient(MONGO_URI)
