@@ -8,9 +8,9 @@ from pydantic import BaseModel
 from typing import Optional
 from app.database import db
 from fastapi import Request
-
+import os
 # Configuración
-SECRET_KEY = "tu_clave_secreta_muy_segura"  # Cambia esto en producción!
+SECRET_KEY = os.getenv("SECRET_KEY")  # Cambia esto en producción!
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
