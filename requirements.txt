@@ -7,4 +7,4 @@ passlib[bcrypt]
 python-multipart
 pydantic
 websockets
-
+email-validator==2.1.0  # Versión compatible
