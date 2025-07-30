@@ -1,4 +1,5 @@
 from pymongo import IndexModel, DESCENDING
+from motor.motor_asyncio import AsyncIOMotorClient
 import logging
 import os
 from pymongo import MongoClient
@@ -9,7 +10,7 @@ logger = logging.getLogger(__name__)
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = "blog_db"
 
-client = MongoClient(MONGO_URI)
+client = AsyncIOMotorClient(MONGO_URI)
 db = client[DB_NAME]
 
 async def initialize_database():
