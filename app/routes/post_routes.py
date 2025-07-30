@@ -6,6 +6,8 @@ from app.models.post_model import Post, UserPostsResponse
 from typing import List, Optional
 from ..websocket_manager import manager  # Importa el manager de WebSocket
 from datetime import datetime
+import logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -16,24 +18,50 @@ async def get_posts(
     limit: int = Query(10, le=100),
     current_user: Optional[dict] = Depends(optional_auth)
 ):
-    query = db.posts.find().sort("created_at", -1).skip(skip).limit(limit)
+    # Usar agregación para hacer JOIN con users en una sola consulta
+    pipeline = [
+        {"$sort": {"created_at": -1}},
+        {"$skip": skip},
+        {"$limit": limit},
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "author_id",
+                "foreignField": "_id",
+                "as": "author_info"
+            }
+        },
+        {
+            "$addFields": {
+                "profile_picture": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$author_info.profile_picture", 0]},
+                        ""
+                    ]
+                },
+                "username": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$author_info.username", 0]},
+                        ""
+                    ]
+                }
+            }
+        },
+        {"$unset": "author_info"}  # Remover el array temporal
+    ]
     
     posts = []
-    async for post in query:
-        # Obtener información del autor
-        author = await db.users.find_one({"_id": ObjectId(post.get("author_id", ""))})
+    async for post in db.posts.aggregate(pipeline):
+        # Convertir ObjectId a string
+        post["_id"] = str(post["_id"])
+        post["author_id"] = str(post["author_id"])
         
-        post_data = {
-            **post,
-            "_id": str(post["_id"]),
-            "author_id": str(post.get("author_id", "")),
-            "author_profile_picture": author.get("profile_picture", "") if author else ""
-        }
+        # Verificar likes si hay usuario autenticado
+        liked_by = [str(user) for user in post.get("liked_by", [])]
+        post["has_liked"] = current_user and str(current_user["_id"]) in liked_by
+        post["liked_by"] = liked_by
         
-        # Solo verificar likes si hay usuario autenticado
-        post_data["has_liked"] = current_user and str(current_user["_id"]) in post.get("liked_by", [])
-            
-        posts.append(post_data)
+        posts.append(post)
     
     return posts
 
@@ -52,47 +80,65 @@ async def get_user_posts(
             detail="ID de usuario inválido"
         )
     
-    # Verificar si el usuario existe
-    user_exists = await db.users.find_one({"_id": user_object_id})
-    if not user_exists:
+    # Verificar si el usuario existe y obtener posts en una sola agregación
+    pipeline = [
+        {"$match": {"_id": user_object_id}},
+        {
+            "$lookup": {
+                "from": "posts",
+                "let": {"user_id_str": {"$toString": "$_id"}},
+                "pipeline": [
+                    {"$match": {"$expr": {"$eq": ["$author_id", "$$user_id_str"]}}},
+                    {"$sort": {"created_at": -1}},
+                    {"$skip": skip},
+                    {"$limit": limit}
+                ],
+                "as": "user_posts"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "posts",
+                "let": {"user_id_str": {"$toString": "$_id"}},
+                "pipeline": [
+                    {"$match": {"$expr": {"$eq": ["$author_id", "$$user_id_str"]}}},
+                    {"$count": "total"}
+                ],
+                "as": "total_count"
+            }
+        }
+    ]
+    
+    result = await db.users.aggregate(pipeline).to_list(1)
+    
+    if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Usuario no encontrado"
         )
     
-    # Consulta para obtener solo los posts del usuario específico
-    query = db.posts.find({"author_id": str(user_object_id)})\
-        .sort("created_at", -1)\
-        .skip(skip)\
-        .limit(limit)
-        
-    # Obtener el conteo total de posts del usuario
-    total_posts = await db.posts.count_documents({"author_id": str(user_object_id)})
-    
+    user_data = result[0]
     posts = []
-    async for post in query:
-        # Obtener información del autor
-        author = await db.users.find_one({"_id": ObjectId(post.get("author_id", ""))})
-        post_data = Post(
-            title=post["title"],
-            content=post["content"],
-            author_id=str(post.get("author_id", "")),
-            created_at=post["created_at"],
-            likes_count=post.get("likes_count", 0),
-            liked_by=post.get("liked_by", [])
-        )
-        
-        # Añadir campos adicionales que no están en el modelo Post
-        post_data_dict = post_data.dict()
-        post_data_dict["_id"] = str(post["_id"])
-        post_data_dict["author_username"] = post.get("author_username", "")
-        post_data_dict["comments_count"] = post.get("comments_count", 0)
-        post_data_dict["author_profile_picture"] = author.get("profile_picture", "") if author else ""
-        
-        # Verificar si el usuario actual dio like
-        post_data_dict["has_liked"] = current_user and str(current_user["_id"]) in post.get("liked_by", [])
-            
-        posts.append(post_data_dict)
+    
+    for post in user_data.get("user_posts", []):
+        liked_by = [str(user) for user in post.get("liked_by", [])]
+        post_dict = {
+            "_id": str(post["_id"]),
+            "title": post["title"],
+            "content": post["content"],
+            "author_id": str(post.get("author_id", "")),
+            "author_username": user_data["username"],
+            "created_at": post["created_at"],
+            "likes_count": post.get("likes_count", 0),
+            "liked_by": liked_by,
+            "comments_count": post.get("comments_count", 0),
+            "author_profile_picture": user_data.get("profile_picture", ""),
+            "has_liked": current_user and str(current_user["_id"]) in liked_by
+        }
+        posts.append(post_dict)
+    
+    total_count_data = user_data.get("total_count", [])
+    total_posts = total_count_data[0].get("total", 0) if total_count_data else 0
     
     return {
         "posts": posts,

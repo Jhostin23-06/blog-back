@@ -3,8 +3,10 @@ uvicorn
 pymongo
 motor
 python-jose[cryptography]
-passlib[bcrypt]
+passlib==1.7.4
+bcrypt==3.2.0
 python-multipart
 pydantic
 websockets
 email-validator==2.1.0  # Versión compatible
+python-dotenv

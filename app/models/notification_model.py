@@ -2,11 +2,14 @@ from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
+from bson import ObjectId  # Añade esto para manejar ObjectId en serialización
 
 class NotificationType(str, Enum):
     LIKE = "like"
     COMMENT = "comment"
     NEW_FOLLOWER = "new_follower"
+    FRIEND_REQUEST = "friend_request"
+    FRIEND_ACCEPTED = "friend_accepted"
 
 class NotificationBase(BaseModel):
     type: NotificationType
@@ -27,11 +30,13 @@ class Notification(NotificationBase):
     emitter_username: str
     post_id: Optional[str] = None
     comment_id: Optional[str] = None
+    relationship: Optional[str] = None
     
     # Configuración para Pydantic v2
     model_config = ConfigDict(
         json_encoders={
             datetime: lambda dt: dt.isoformat(),
+            ObjectId: str  # Añade esto para manejar ObjectId en serialización
         },
         populate_by_name=True  # Equivalente a allow_population_by_field_name
     )

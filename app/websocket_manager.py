@@ -66,15 +66,22 @@ class WebSocketManager:
     async def broadcast_event(self, post_id: str, event_data: dict):
         if post_id in self.active_connections:
             for connection in self.active_connections[post_id]:
-                await connection.send_json(event_data)
+                try:
+                    await connection.send_json(event_data)
+                    logger.info(f"Evento enviado para post {post_id}: {event_data}")
+                except Exception as e:
+                    logger.error(f"Error enviando evento para post {post_id}: {str(e)}")
                 
     async def broadcast_notification(self, user_id: str, notification: Union[Notification, dict]):
         print(f"🔔 Intentando enviar notificación a usuario {user_id}")
         if user_id in self.active_user_connections:
             try:
-                print(f"✅ Usuario {user_id} tiene {len(self.active_user_connections[user_id])} conexiones activas")
+                print(f"✅ Usuario {user_id} tiene {len(self.active_user_connections[user_id])} conexiones activas") 
                 # Conversión segura a Notification
                 if isinstance(notification, dict):
+                    notification["_id"] = str(notification["_id"])  # Convertir ObjectId a string
+                    notification["user_id"] = str(notification.get("user_id", ""))
+                    notification["emitter_id"] = str(notification.get("emitter_id", ""))
                     notification = Notification.model_validate(notification)
                 
                 notification_dict = notification.model_dump(by_alias=True, mode='json')
@@ -141,7 +148,24 @@ class WebSocketManager:
                     except Exception as e:
                         logger.error(f"Error broadcasting to user {user_id}: {str(e)}")
                         await self.disconnect_user(connection, user_id)
-                
+                        
+    async def broadcast_profile_update(self, user_id: str, user_data: dict):
+        """Envía una actualización de perfil a todos los clientes conectados"""
+        try:
+            print(f"🔄 Enviando actualización de perfil para usuario {user_id} a todas las conexiones")
+            for current_user_id in list(self.active_user_connections.keys()):
+                for connection in self.active_user_connections[current_user_id].copy():
+                    try:
+                        await connection.send_json({
+                            "event": "profile_updated",
+                            "data": user_data
+                        })
+                        print(f"✅ Actualización de perfil enviada a conexión de usuario {current_user_id}")
+                    except Exception as e:
+                        logger.error(f"Error enviando actualización de perfil: {str(e)}")
+                        await self.disconnect_user(connection, current_user_id)
+        except Exception as e:
+            logger.error(f"Error procesando actualización de perfil: {str(e)}")
 
 # Instancia global para ser usada en otros archivos
 manager = WebSocketManager()
