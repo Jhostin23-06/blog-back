@@ -1,13 +1,15 @@
-from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import IndexModel, DESCENDING
 import logging
+import os
+from pymongo import MongoClient
 
 logger = logging.getLogger(__name__)
 
-MONGO_URI = "mongodb+srv://urbano:ur.dbMongoDB@cluster0.avnsluf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+## MONGO_URI = "mongodb+srv://urbano:ur.dbMongoDB@cluster0.avnsluf.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = "blog_db"
 
-client = AsyncIOMotorClient(MONGO_URI)
+client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 
 async def initialize_database():
