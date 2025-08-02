@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from bson import ObjectId
 from app.database import db
-from app.auth import require_role, UserRole
+from app.auth import require_role, UserRole, optional_auth
 from app.models.notification_model import NotificationCreate, NotificationType
 from app.websocket_manager import manager
 from datetime import datetime
-from typing import List
+from typing import List 
+
 
 
 router = APIRouter(prefix="/friends", tags=["Friends"])
@@ -124,48 +125,101 @@ async def accept_friend_request(
     # Debug: Mostrar relaciones del remitente
     print(f"Relaciones del remitente: {requester_data.get('relationships')}")
     
-    # Actualizar relaciones en ambos usuarios
-    async with await db.client.start_session() as session:
-        try:
-            async with session.start_transaction():
-                # Actualizar usuario actual (aceptante)
-                await db.users.update_one(
-                    {"_id": current_user_oid},
-                    {
-                        "$set": {f"relationships.{str(requester_oid)}": "friend"},
-                        "$pull": {"friend_requests": str(requester_oid)}  # Limpiar array antiguo
-                    },
-                    session=session
-                )
-                
-                # Actualizar remitente
-                await db.users.update_one(
-                    {"_id": requester_oid},
-                    {
-                        "$set": {f"relationships.{str(current_user_oid)}": "friend"},
-                        "$pull": {"sent_requests": str(current_user_oid)}  # Limpiar array antiguo
-                    },
-                    session=session
-                )
-                
-                # Crear notificación
-                notification = {
-                    "user_id": str(requester_oid),
-                    "emitter_id": str(current_user_oid),
-                    "emitter_username": current_user["username"],
-                    "type": NotificationType.FRIEND_ACCEPTED.value,
-                    "message": f"{current_user['username']} aceptó tu solicitud de amistad",
-                    "read": False,
-                    "created_at": datetime.utcnow()
+    # Variable para controlar si usamos transacciones o no
+    use_transactions = True
+    
+    try:
+        if use_transactions:
+            # Intentar usar transacciones
+            async with await db.client.start_session() as session:
+                transaction_successful = False
+                try:
+                    async with session.start_transaction():
+                        # Actualizar usuario actual (aceptante)
+                        await db.users.update_one(
+                            {"_id": current_user_oid},
+                            {
+                                "$set": {f"relationships.{str(requester_oid)}": "friend"},
+                                "$pull": {"friend_requests": str(requester_oid)}  # Limpiar array antiguo
+                            },
+                            session=session
+                        )
+                        
+                        # Actualizar remitente
+                        await db.users.update_one(
+                            {"_id": requester_oid},
+                            {
+                                "$set": {f"relationships.{str(current_user_oid)}": "friend"},
+                                "$pull": {"sent_requests": str(current_user_oid)}  # Limpiar array antiguo
+                            },
+                            session=session
+                        )
+                        
+                        # Crear notificación
+                        notification = {
+                            "user_id": str(requester_oid),
+                            "emitter_id": str(current_user_oid),
+                            "emitter_username": current_user["username"],
+                            "type": NotificationType.FRIEND_ACCEPTED.value,
+                            "message": f"{current_user['username']} aceptó tu solicitud de amistad",
+                            "read": False,
+                            "created_at": datetime.utcnow()
+                        }
+                        
+                        await db.notifications.insert_one(notification, session=session)
+                        await manager.broadcast_notification(str(requester_oid), notification)
+                        transaction_successful = True
+                except Exception as tx_error:
+                    # No necesitamos abortar explícitamente, el context manager lo hará
+                    # Solo marcamos que la transacción falló
+                    transaction_successful = False
+                    if "Transaction numbers are only allowed on a replica set member or mongos" in str(tx_error):
+                        # Si el error es por falta de soporte de transacciones, cambiamos a modo sin transacciones
+                        use_transactions = False
+                        # Y dejamos que el código continúe con el enfoque sin transacciones
+                    else:
+                        # Para otros errores, los propagamos
+                        print(f"Error en transacción: {str(tx_error)}")
+                        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error en la transacción: {str(tx_error)}")
+        
+        # Si las transacciones no están disponibles o fallaron por falta de soporte, usamos el enfoque sin transacciones
+        if not use_transactions:
+            print("Usando enfoque sin transacciones")
+            # Actualizar usuario actual (aceptante)
+            await db.users.update_one(
+                {"_id": current_user_oid},
+                {
+                    "$set": {f"relationships.{str(requester_oid)}": "friend"},
+                    "$pull": {"friend_requests": str(requester_oid)}  # Limpiar array antiguo
                 }
-                
-                await db.notifications.insert_one(notification, session=session)
-                await manager.broadcast_notification(str(requester_oid), notification)
-                
-        except Exception as e:
-            await session.abort_transaction()
-            logger.error(f"Error en transacción: {str(e)}")
-            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error en la transacción")
+            )
+            
+            # Actualizar remitente
+            await db.users.update_one(
+                {"_id": requester_oid},
+                {
+                    "$set": {f"relationships.{str(current_user_oid)}": "friend"},
+                    "$pull": {"sent_requests": str(current_user_oid)}  # Limpiar array antiguo
+                }
+            )
+            
+            # Crear notificación
+            notification = {
+                "user_id": str(requester_oid),
+                "emitter_id": str(current_user_oid),
+                "emitter_username": current_user["username"],
+                "type": NotificationType.FRIEND_ACCEPTED.value,
+                "message": f"{current_user['username']} aceptó tu solicitud de amistad",
+                "read": False,
+                "created_at": datetime.utcnow()
+            }
+            
+            await db.notifications.insert_one(notification)
+            await manager.broadcast_notification(str(requester_oid), notification)
+    except Exception as e:
+        # Capturamos cualquier otro error no relacionado con transacciones
+        print(f"Error general: {str(e)}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Error al procesar la solicitud: {str(e)}")
     
     # Obtener y devolver estado actualizado
     updated_user = await db.users.find_one({"_id": current_user_oid})
@@ -264,6 +318,58 @@ async def get_friends(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error al obtener la lista de amigos"
+        )
+
+@router.get("/user/{user_id}", response_model=List[dict])
+async def get_user_friends(
+    user_id: str,
+    current_user: dict = Depends(optional_auth)  # Hacer opcional para permitir ver amigos sin estar autenticado
+):
+    try:
+        # Validar ID
+        if not ObjectId.is_valid(user_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ID de usuario inválido"
+            )
+            
+        user_oid = ObjectId(user_id)
+        user_data = await db.users.find_one({"_id": user_oid})
+        
+        if not user_data:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuario no encontrado")
+        
+        # Obtener todos los amigos (donde la relación es "friend")
+        relationships = user_data.get("relationships", {})
+        friend_ids = [
+            user_id for user_id, rel_type in relationships.items()
+            if rel_type == "friend"
+        ]
+        
+        if not friend_ids:
+            return []
+        
+        # Obtener información de los amigos
+        friends = await db.users.find(
+            {"_id": {"$in": [ObjectId(id) for id in friend_ids]}},
+            {"username": 1, "profile_picture": 1, "bio": 1, "cover_photo": 1}
+        ).to_list(None)
+        
+        return [{
+            "id": str(friend["_id"]),
+            "username": friend["username"],
+            "profile_picture": friend.get("profile_picture", ""),
+            "bio": friend.get("bio", ""),
+            "cover_photo": friend.get("cover_photo", "")
+        } for friend in friends]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error en get_user_friends: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener la lista de amigos del usuario"
         )
 
 @router.get("/requests", response_model=List[dict])

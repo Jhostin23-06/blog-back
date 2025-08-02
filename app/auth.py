@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # Configuración 
 SECRET_KEY = os.getenv("SECRET_KEY", "NegdgE{=1BX_|,E>,qG14h@q%")  # Cambia esto en producción!
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 # Esquema de seguridad
 security = HTTPBearer()
