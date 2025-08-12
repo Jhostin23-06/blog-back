@@ -48,15 +48,21 @@ async def register(user: UserCreate):
         "hashed_password": hashed_password,
         "role": user.role.value,
         "bio": user.bio or "",  # Cadena vacía si no se proporciona
-        "profile_picture": user.profile_picture or "https://ejemplo.com/default-profile.jpg",
-        "cover_photo": user.cover_photo or "https://ejemplo.com/default-cover.jpg",
-        "created_at": datetime.utcnow()
+        "current_profile_picture": None,  # Inicialmente no hay imagen seleccionada
+        "current_cover_photo": None,      # Inicialmente no hay imagen seleccionada
+        "profile_picture_url": None,      # Inicialmente no hay URL de imagen
+        "cover_photo_url": None,          # Inicialmente no hay URL de imagen
+        "relationships": {},              # Relaciones vacías por defecto
+        "created_at": datetime.utcnow(),
+        "updated_at": None
     }
     
     try:
         result = await db.users.insert_one(db_user)
         if result.inserted_id:
             # Retornar el usuario sin la contraseña en texto plano
+            # Obtener el usuario recién creado para asegurar consistencia
+            created_user = await db.users.find_one({"_id": result.inserted_id})
             return UserInDB(
                 id=str(result.inserted_id),
                 username=user.username,
@@ -64,9 +70,13 @@ async def register(user: UserCreate):
                 hashed_password=hashed_password,
                 role=user.role,
                 bio=user.bio,
-                profile_picture=user.profile_picture,
-                cover_photo=user.cover_photo,
-                created_at=datetime.utcnow()
+                current_profile_picture=created_user.get("current_profile_picture"),
+                current_cover_photo=created_user.get("current_cover_photo"),
+                profile_picture_url=created_user.get("profile_picture_url"),
+                cover_photo_url=created_user.get("cover_photo_url"),
+                relationships=created_user.get("relationships", {}),
+                created_at=created_user["created_at"],
+                updated_at=created_user.get("updated_at")
             )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -287,6 +297,7 @@ async def update_user_profile(
             "email": updated_user["email"],
             "bio": updated_user.get("bio", ""),
             "profile_picture": updated_user.get("profile_picture"),
+
             "cover_photo": updated_user.get("cover_photo"),
             "role": updated_user.get("role", UserRole.USER.value),
             "updated_at": updated_user.get("updated_at", datetime.utcnow()).isoformat()
@@ -339,6 +350,20 @@ async def get_user_profile(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Usuario no encontrado"
             )
+
+        # Obtener URLs de las imágenes si existen
+        profile_picture_url = None
+        cover_photo_url = None
+
+        if user.get("current_profile_picture"):
+            profile_pic = await db.images.find_one({"_id": ObjectId(user["current_profile_picture"])})
+            if profile_pic:
+                profile_picture_url = profile_pic.get("url")
+        
+        if user.get("current_cover_photo"):
+            cover_photo = await db.images.find_one({"_id": ObjectId(user["current_cover_photo"])})
+            if cover_photo:
+                cover_photo_url = cover_photo.get("url")
         
         # Si hay usuario autenticado, verificar si es el mismo o admin
         if current_user:
@@ -347,7 +372,7 @@ async def get_user_profile(
             
             # Si no es ni el dueño ni admin, ocultar información sensible
             if not (is_owner or is_admin):
-                user["email"] = None
+                # user["email"] = None
                 user["hashed_password"] = None
                 user["role"] = UserRole.USER.value  # No revelar roles reales
         
@@ -367,15 +392,19 @@ async def get_user_profile(
             current_user_id = str(current_user["_id"])
             is_friend = user_id in current_user.get("friends", [])
             has_pending_request = user_id in current_user.get("friend_requests", []) or current_user_id in user.get("friend_requests", [])
+
         
+
         # Preparar datos para la respuesta
         response_data = {
             "id": str(user["_id"]),
             "username": user["username"],
             "role": UserRole(user["role"]),
             "bio": user.get("bio", ""),
-            "profile_picture": user.get("profile_picture"),
-            "cover_photo": user.get("cover_photo"),
+            "current_profile_picture": user.get("current_profile_picture"),
+            "current_cover_photo": user.get("current_cover_photo"),
+            "profile_picture_url": profile_picture_url,
+            "cover_photo_url": cover_photo_url,
             "created_at": user["created_at"],
             "updated_at": user.get("updated_at"),
             "relationships": user.get("relationships", {}),  # Añade esto
@@ -386,7 +415,7 @@ async def get_user_profile(
     
         # Solo incluir email y hashed_password si está autorizado
         if current_user and (str(current_user.get("id")) == user_id or 
-                            current_user.get("role") == UserRole.ADMIN.value):
+                            current_user.get("role") == UserRole.USER.value):
             response_data["email"] = user["email"]
             response_data["hashed_password"] = user["hashed_password"]
         
@@ -399,3 +428,61 @@ async def get_user_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error interno del servidor"
         )
+
+@router.patch("/users/{user_id}/profile-picture")
+async def set_profile_picture(
+    user_id: str,
+    image_data: dict,
+    current_user: dict = Depends(require_role(UserRole.USER))
+):
+    # Verificar que el usuario es el dueño
+    if str(current_user["_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    
+    # Verificar que la imagen existe y pertenece al usuario
+    image = await db.images.find_one({
+        "_id": ObjectId(image_data["imageId"]),
+        "owner_id": user_id
+    })
+    if not image:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    
+    # Actualizar el usuario
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {
+            "current_profile_picture": image_data["imageId"],
+            "profile_picture": image["url"]
+        }}
+    )
+    
+    return {"message": "Foto de perfil actualizada"}
+
+@router.patch("/users/{user_id}/cover-photo")
+async def set_cover_photo(
+    user_id: str,
+    image_data: dict,
+    current_user: dict = Depends(require_role(UserRole.USER))
+):
+    # Verificar que el usuario es el dueño
+    if str(current_user["_id"]) != user_id:
+        raise HTTPException(status_code=403, detail="No autorizado")
+    
+    # Verificar que la imagen existe y pertenece al usuario
+    image = await db.images.find_one({
+        "_id": ObjectId(image_data["imageId"]),
+        "owner_id": user_id
+    })
+    if not image:
+        raise HTTPException(status_code=404, detail="Imagen no encontrada")
+    
+    # Actualizar el usuario
+    await db.users.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {
+            "current_cover_photo": image_data["imageId"],
+            "cover_photo": image["url"]
+        }}
+    )
+    
+    return {"message": "Foto de portada actualizada"}

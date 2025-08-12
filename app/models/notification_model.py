@@ -10,6 +10,8 @@ class NotificationType(str, Enum):
     NEW_FOLLOWER = "new_follower"
     FRIEND_REQUEST = "friend_request"
     FRIEND_ACCEPTED = "friend_accepted"
+    IMAGE_LIKE = "image_like"          # Nuevo
+    IMAGE_COMMENT = "image_comment"    # Nuevo
 
 class NotificationBase(BaseModel):
     type: NotificationType
@@ -22,6 +24,7 @@ class NotificationCreate(NotificationBase):
     emitter_id: str  # ID del usuario que genera la notificación
     post_id: Optional[str] = None  # ID del post relacionado (opcional)
     comment_id: Optional[str] = None  # ID del comentario (opcional)
+    image_id: Optional[str] = None  # Nuevo
 
 class Notification(NotificationBase):
     id: str = Field(alias="_id")

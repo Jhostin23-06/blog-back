@@ -1,5 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from app.routes import user_routes, post_routes, comment_routes, notifications, friendship_routes
+from app.routes import user_routes, post_routes, comment_routes, notifications, friendship_routes, images
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List
 from app.websocket_manager import manager
@@ -10,12 +10,15 @@ from datetime import datetime
 import json
 import logging
 from dotenv import load_dotenv
+from fastapi.staticfiles import StaticFiles
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Configuración CORS actualizada
 origins = [
@@ -113,8 +116,18 @@ async def notifications_websocket(websocket: WebSocket, user_id: str):
         except:
             pass
 
+@app.websocket("/ws/images/{image_id}")
+async def image_websocket(websocket: WebSocket, image_id: str):
+    await manager.connect(websocket, image_id)
+    try:
+        while True:
+            await websocket.receive_text()  # Mantener conexión abierta
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, image_id)
+
 app.include_router(user_routes.router, prefix="/api")
 app.include_router(post_routes.router, prefix="/api")
 app.include_router(comment_routes.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(friendship_routes.router, prefix="/api")
+app.include_router(images.router, prefix="/api")  # Añade esta línea para el router de imágenes

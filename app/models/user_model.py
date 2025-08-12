@@ -14,8 +14,10 @@ class UserBase(BaseModel):
     email: Optional[EmailStr] = None
     # Campos completamente opcionales con valores por defecto None
     bio: Optional[str] = Field(None, max_length=500)
-    profile_picture: Optional[str] = Field(None)
-    cover_photo: Optional[str] = Field(None)
+    current_profile_picture: Optional[str] = Field(None)  # ID de la imagen actual
+    current_cover_photo: Optional[str] = Field(None)      # ID de la imagen actual
+    profile_picture_url: Optional[str] = Field(None)
+    cover_photo_url: Optional[str] = Field(None)    
     relationships: Dict[str, str] = Field(default_factory=dict)
     
 class UserLogin(BaseModel):
@@ -28,6 +30,7 @@ class UserCreate(UserBase):
 
 class UserInDB(UserBase):
     id: str
+    email: Optional[str] = None
     hashed_password: Optional[str] = None
     role: UserRole
     created_at: datetime
@@ -44,7 +47,7 @@ class UserInDB(UserBase):
     
 class UserUpdate(BaseModel):
     username: Optional[str] = Field(None, min_length=3, max_length=50)
-    email: Optional[EmailStr] = None
+    email: Optional[EmailStr] = Field(None)
     bio: Optional[str] = Field(None, max_length=500)
     profile_picture: Optional[str] = None
     cover_photo: Optional[str] = None
