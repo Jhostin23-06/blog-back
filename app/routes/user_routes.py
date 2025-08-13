@@ -486,3 +486,95 @@ async def set_cover_photo(
     )
     
     return {"message": "Foto de portada actualizada"}
+
+@router.get("/users/search/", response_model=list[UserInDB])
+async def search_users(
+    query: str = Query(..., min_length=1, description="Texto para buscar usuarios"),
+    limit: int = Query(10, ge=1, le=100, description="Límite de resultados"),
+    current_user: dict = Depends(optional_auth)
+):
+    """
+    Busca usuarios por nombre de usuario, email o biografía.
+    """
+    try:
+        # Crear expresión de búsqueda case-insensitive
+        search_regex = {"$regex": f".*{query}.*", "$options": "i"}
+        
+        # Consulta para buscar en username, email o bio
+        search_query = {
+            "$or": [
+                {"username": search_regex},
+                {"email": search_regex},
+                {"bio": search_regex}
+            ]
+        }
+        
+        # Ejecutar la consulta
+        users_cursor = db.users.find(search_query).limit(limit)
+        users = await users_cursor.to_list(length=limit)
+        
+        # Procesar resultados
+        results = []
+        for user in users:
+            # Obtener URLs de imágenes si existen
+            profile_picture_url = None
+            cover_photo_url = None
+            
+            if user.get("current_profile_picture"):
+                profile_pic = await db.images.find_one({"_id": ObjectId(user["current_profile_picture"])})
+                if profile_pic:
+                    profile_picture_url = profile_pic.get("url")
+            
+            if user.get("current_cover_photo"):
+                cover_photo = await db.images.find_one({"_id": ObjectId(user["current_cover_photo"])})
+                if cover_photo:
+                    cover_photo_url = cover_photo.get("url")
+            
+            # Ocultar información sensible si no es el usuario actual o admin
+            if current_user:
+                is_owner = str(current_user.get("id")) == str(user["_id"])
+                is_admin = current_user.get("role") == UserRole.ADMIN.value
+                
+                if not (is_owner or is_admin):
+                    user["email"] = None
+                    user["hashed_password"] = None
+            
+            # Agregar información de amistad si hay usuario autenticado
+            is_friend = False
+            has_pending_request = False
+            
+            if current_user:
+                current_user_id = str(current_user["_id"])
+                user_id = str(user["_id"])
+                is_friend = user_id in current_user.get("friends", [])
+                has_pending_request = (user_id in current_user.get("friend_requests", []) or current_user_id in user.get("friend_requests", []))
+            
+            # Construir objeto de respuesta
+            user_data = {
+                "id": str(user["_id"]),
+                "username": user["username"],
+                "email": user.get("email"),
+                "role": UserRole(user["role"]),
+                "bio": user.get("bio", ""),
+                "current_profile_picture": user.get("current_profile_picture"),
+                "current_cover_photo": user.get("current_cover_photo"),
+                "profile_picture_url": profile_picture_url,
+                "cover_photo_url": cover_photo_url,
+                "created_at": user["created_at"],
+                "updated_at": user.get("updated_at"),
+                "relationships": user.get("relationships", {}),
+                "is_friend": is_friend,
+                "has_pending_request": has_pending_request,
+                "friends_count": len(user.get("friends", []))
+            }
+            
+            results.append(UserInDB(**user_data))
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error en búsqueda de usuarios: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor"
+        )
