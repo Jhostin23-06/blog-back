@@ -10,7 +10,10 @@ from datetime import datetime
 import json
 import logging
 from dotenv import load_dotenv
-from fastapi.staticfiles import StaticFiles
+from fastapi.staticfiles import StaticFiles 
+import asyncio
+import time
+## 
 
 load_dotenv()
 
@@ -118,12 +121,35 @@ async def notifications_websocket(websocket: WebSocket, user_id: str):
 
 @app.websocket("/ws/images/{image_id}")
 async def image_websocket(websocket: WebSocket, image_id: str):
-    await manager.connect(websocket, image_id)
     try:
+        await manager.connect_image(websocket, image_id)
+        logger.info(f"✅ Conexión WebSocket establecida para imagen {image_id}")
+        
         while True:
-            await websocket.receive_text()  # Mantener conexión abierta
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, image_id)
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                if data == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                # Enviar ping para mantener conexión
+                try:
+                    await websocket.send_text("ping")
+                except:
+                    break
+            except WebSocketDisconnect:
+                logger.info(f"🛑 WebSocket desconectado normalmente para imagen {image_id}")
+                break
+            except Exception as e:
+                logger.error(f"⚠️ Error en WebSocket: {str(e)}")
+                break
+                
+    except Exception as e:
+        logger.error(f"❌ Error en conexión WebSocket: {str(e)}")
+    finally:
+        try:
+            await manager.disconnect_image(websocket, image_id)
+        except Exception as e:
+            logger.error(f"⚠️ Error al desconectar: {str(e)}")
 
 app.include_router(user_routes.router, prefix="/api")
 app.include_router(post_routes.router, prefix="/api")

@@ -4,11 +4,26 @@ from app.auth import require_role, UserRole, optional_auth
 from app.database import db
 from app.models.comment_model import Comment, CommentCreate
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+import pytz
 from app.websocket_manager import manager  # Importa el manager aquí
 
+# Configura la zona horaria de Perú
+PERU_TIMEZONE = pytz.timezone('America/Lima')
 
 router = APIRouter(prefix="/comments", tags=["comments"])
+
+def get_peru_time():
+    return datetime.now(PERU_TIMEZONE)
+
+def format_peru_time(dt: datetime):
+    """Formatea datetime para mantener la zona horaria de Perú"""
+    if dt.tzinfo is None:
+        # Si no tiene zona horaria, asumimos que es UTC y convertimos
+        dt = pytz.utc.localize(dt).astimezone(PERU_TIMEZONE)
+    return dt.isoformat()
+
+
 
 @router.post("/", response_model=Comment, status_code=status.HTTP_201_CREATED)
 async def create_comment(
@@ -28,11 +43,12 @@ async def create_comment(
             )
         
         # Crear el comentario con los datos del usuario
+        peru_time = get_peru_time()
         comment_dict = comment_data.dict()
         comment_dict.update({
             "author_id": str(current_user["_id"]),
             "author_username": current_user.get("username", ""),
-            "created_at": datetime.utcnow()
+            "created_at": peru_time
         })
         
         # Insertar el comentario
@@ -41,7 +57,7 @@ async def create_comment(
         # Obtener y devolver el comentario creado
         created_comment = await db.comments.find_one({"_id": result.inserted_id})
         created_comment["_id"] = str(created_comment["_id"])
-        created_comment["created_at"] = created_comment["created_at"].isoformat()
+        created_comment["created_at"] = format_peru_time(created_comment["created_at"])
         
         # Incrementar el contador de comentarios en el post
         await db.posts.update_one(
@@ -61,7 +77,7 @@ async def create_comment(
                 "type": "comment",
                 "message": f"{current_user['username']} comentó en tu publicación: {comment_data.content[:30]}...",
                 "read": False,
-                "created_at": datetime.utcnow()
+                "created_at": get_peru_time()  # ← También usar hora Perú aquí
             }
         
             notification_result = await db.notifications.insert_one(notification)
@@ -113,6 +129,8 @@ async def get_comments(
         comments = []
         async for comment in cursor:
             comment["_id"] = str(comment["_id"])
+            # Aplicar formato de hora Perú a cada comentario ← ¡ESTA LÍNEA FALTABA!
+            comment["created_at"] = format_peru_time(comment["created_at"])
             comments.append(comment)
             
         return comments
