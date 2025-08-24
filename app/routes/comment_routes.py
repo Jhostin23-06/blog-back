@@ -6,7 +6,10 @@ from app.models.comment_model import Comment, CommentCreate
 from typing import List, Optional
 from datetime import datetime, timezone
 import pytz
+import logging
 from app.websocket_manager import manager  # Importa el manager aquí
+
+logger = logging.getLogger(__name__)
 
 # Configura la zona horaria de Perú
 PERU_TIMEZONE = pytz.timezone('America/Lima')
@@ -48,6 +51,7 @@ async def create_comment(
         comment_dict.update({
             "author_id": str(current_user["_id"]),
             "author_username": current_user.get("username", ""),
+            "author_profile_picture": current_user.get("profile_picture", ""),
             "created_at": peru_time
         })
         
@@ -65,9 +69,19 @@ async def create_comment(
             {"$inc": {"comments_count": 1}},
             upsert=True
         )
+
+        # Emitir el comentario via WebSocket - SOLO SI HAY CONEXIONES
+        try:
+            await manager.broadcast_comment(post_id, created_comment)
+            logger.info(f"Comentario broadcasted para post {post_id}")
+        except Exception as e:
+            logger.error(f"Error en broadcast_comment: {str(e)}")
+            # NO relanzar la excepción - permitir que la operación continue 
         
         # Crear notificación si no es comentario propio
         if str(post["author_id"]) != str(current_user["_id"]):
+            post_author = await db.users.find_one({"_id": ObjectId(post["author_id"])})
+
             notification = {
                 "user_id": str(post["author_id"]),
                 "emitter_id": str(current_user["_id"]),
@@ -77,7 +91,20 @@ async def create_comment(
                 "type": "comment",
                 "message": f"{current_user['username']} comentó en tu publicación: {comment_data.content[:30]}...",
                 "read": False,
-                "created_at": get_peru_time()  # ← También usar hora Perú aquí
+                "created_at": get_peru_time(),  # ← También usar hora Perú aquí
+                # AGREGAR TODA LA INFORMACIÓN DEL POST (igual que para likes)
+                "post_id": post_id,
+                "post_title": post.get("title", ""),
+                "post_content": post.get("content", ""),
+                "post_author_id": str(post["author_id"]),
+                "post_author_username": post_author.get("username", "Usuario") if post_author else "Usuario",
+                "post_author_profile_picture": post_author.get("profile_picture", "") if post_author else "",
+                "post_image_url": post.get("image_url", ""),
+                "post_likes_count": post.get("likes_count", 0),
+                "post_comments_count": post.get("comments_count", 0) + 1,  # +1 porque acabamos de agregar un comentario
+                "post_liked_by": post.get("liked_by", []),
+                "post_created_at": post.get("created_at", datetime.utcnow()),
+                "post_updated_at": post.get("updated_at", datetime.utcnow())
             }
         
             notification_result = await db.notifications.insert_one(notification)
@@ -120,6 +147,44 @@ async def get_comments(
                 detail="Post no encontrado"
             )
         
+        # Usar agregación para obtener comentarios con información del autor
+        pipeline = [
+            {"$match": {"post_id": post_id}},
+            {"$sort": {"created_at": -1}},
+            {"$skip": skip},
+            {"$limit": limit},
+            {
+                "$lookup": {
+                    "from": "users",
+                    "let": {"author_id_str": "$author_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {
+                                    "$eq": [
+                                        {"$toString": "$_id"},
+                                        "$$author_id_str"
+                                    ]
+                                }
+                            }
+                        }
+                    ],
+                    "as": "author_info"
+                }
+            },
+            {
+                "$addFields": {
+                    "author_profile_picture": {
+                        "$ifNull": [
+                            {"$arrayElemAt": ["$author_info.profile_picture", 0]},
+                            ""
+                        ]
+                    }
+                }
+            },
+            {"$unset": "author_info"}  # Remover el array temporal
+        ]
+        
         # Obtener comentarios paginados
         cursor = db.comments.find({"post_id": post_id}) \
             .sort("created_at", -1) \
@@ -127,7 +192,7 @@ async def get_comments(
             .limit(limit)
         
         comments = []
-        async for comment in cursor:
+        async for comment in db.comments.aggregate(pipeline):
             comment["_id"] = str(comment["_id"])
             # Aplicar formato de hora Perú a cada comentario ← ¡ESTA LÍNEA FALTABA!
             comment["created_at"] = format_peru_time(comment["created_at"])

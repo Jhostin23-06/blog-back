@@ -1,6 +1,6 @@
 # routes/images.py
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Response
-from app.utils.util import upload_file_to_storage
+from app.utils.util import upload_file_to_storage, upload_file_to_storage_post
 from bson import ObjectId
 from app.auth import require_role, UserRole
 from app.database import db 
@@ -10,6 +10,9 @@ from app.websocket_manager import manager
 from typing import List, Optional
 import logging
 import pytz
+import os
+import uuid
+
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
@@ -279,11 +282,14 @@ async def create_image_comment(
                 "emitter_id": str(current_user["_id"]),
                 "emitter_username": current_user.get("username", "Usuario"),
                 "image_id": image_id,
+                "image_url": str(image["url"]),  # URL de la imagen
+                "image_owner_id": str(image["owner_id"]),  # ID del dueño
+                "image_created_at": image.get("created_at", get_peru_time()),  # Fecha de creación
                 "comment_id": str(result.inserted_id),
                 "type": "image_comment",
                 "message": f"{current_user['username']} comentó tu foto: {comment_data.content[:30]}...",
                 "read": False,
-                "created_at": datetime.utcnow()
+                "created_at": get_peru_time(),
             }
             
             await db.notifications.insert_one(notification)
@@ -444,3 +450,27 @@ async def unlike_image(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "ID de imagen inválido")
         logger.error(f"Error en unlike_image: {str(e)}")
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Error interno del servidor")
+
+## SUBIDA DE IMAGEN A LOS POST 
+@router.post("/upload")
+async def upload_image(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(require_role(UserRole.USER))
+):
+
+    try:
+        # Usar la función de utilidad
+        image_url = await upload_file_to_storage_post(file, "posts")
+
+        
+        return {"image_url": image_url}
+        
+    except HTTPException as he:
+        # Re-lanzar excepciones HTTP existentes
+        raise he
+    except Exception as e:
+        # Manejar otros errores
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al subir la imagen: {str(e)}"
+        )

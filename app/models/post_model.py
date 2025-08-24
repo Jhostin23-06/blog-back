@@ -9,6 +9,7 @@ class Post(BaseModel):
     id: Optional[str] = Field(None, alias="_id")
     title: str
     content: str
+    image_url: Optional[str] = None  # Nuevo campo para la URL de la imagen
     author_id: Optional[str] = None  # Añade este campo
     author_username: Optional[str] = None
     author_profile_picture: Optional[str] = None

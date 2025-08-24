@@ -10,6 +10,7 @@ from app.websocket_manager import manager
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
+
 @router.get("/", response_model=List[Notification])
 async def get_user_notifications(
     current_user: dict = Depends(require_role(UserRole.USER)),
@@ -37,6 +38,27 @@ async def get_user_notifications(
             emitter = await db.users.find_one({"_id": ObjectId(notif["emitter_id"])})
             notif["emitter_username"] = emitter.get("username", "Usuario") if emitter else "Usuario"
         
+        # Asegurar campos opcionales para imágenes
+        notif.setdefault("image_id", None)
+        notif.setdefault("image_url", None)
+        notif.setdefault("image_owner_id", None)
+        notif.setdefault("image_created_at", None)
+        notif.setdefault("post_id", None)
+        notif.setdefault("comment_id", None)
+
+        # Asegurar campos del post
+        notif.setdefault("post_title", "")
+        notif.setdefault("post_content", "")
+        notif.setdefault("post_author_id", "")
+        notif.setdefault("post_author_username", "Usuario")
+        notif.setdefault("post_author_profile_picture", "")
+        notif.setdefault("post_image_url", "")
+        notif.setdefault("post_likes_count", 0)
+        notif.setdefault("post_comments_count", 0)
+        notif.setdefault("post_liked_by", [])
+        notif.setdefault("post_created_at", datetime.utcnow())
+        notif.setdefault("post_updated_at", datetime.utcnow())
+
         # Convertir ObjectId a string
         notif["_id"] = str(notif["_id"])
         

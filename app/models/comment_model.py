@@ -13,6 +13,7 @@ class Comment(CommentBase):
     id: str = Field(alias="_id")
     author_id: str
     author_username: str
+    author_profile_picture: Optional[str] = ""  # ← Nuevo campo
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
     class Config:

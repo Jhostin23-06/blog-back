@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 class WebSocketManager:
     def __init__(self):
+        self.active_post_connections: Dict[str, List[WebSocket]] = defaultdict(list)
         self.active_connections: Dict[str, List[WebSocket]] = {}
         self.active_user_connections: Dict[str, List[WebSocket]] = {}  # Para notificaciones
         self._lock = asyncio.Lock()  # Para evitar race conditions
@@ -97,6 +98,17 @@ class WebSocketManager:
             if not self.active_connections[post_id]:
                 del self.active_connections[post_id]
     
+    async def disconnect_from_post(self, websocket: WebSocket, post_id: str):
+        """Desconectar de un post"""
+        async with self._lock:
+            if post_id in self.active_connections:
+                if websocket in self.active_connections[post_id]:
+                    self.active_connections[post_id].remove(websocket)
+                    logger.info(f"Desconectado del post {post_id}. Restantes: {len(self.active_connections[post_id])}")
+                
+                if not self.active_connections[post_id]:
+                    del self.active_connections[post_id]
+    
     async def disconnect_image(self, websocket: WebSocket, image_id: str):
         """Desconecta un websocket de una imagen específica"""
         try:
@@ -131,12 +143,20 @@ class WebSocketManager:
                     del self.active_user_connections[user_id]
 
     async def broadcast_comment(self, post_id: str, comment: dict):
+        """Transmitir comentario a conexiones de post"""
         if post_id in self.active_connections:
+            serialized_comment = self._serialize_for_websocket(comment)
+            logger.info(f"Broadcasting comment to {len(self.active_connections[post_id])} connections for post {post_id}")
+            
             for connection in self.active_connections[post_id]:
-                await connection.send_json({
-                    "event": "new_comment",
-                    "data": comment
-                })
+                try:
+                    await connection.send_json({
+                        "event": "new_comment",
+                        "data": serialized_comment
+                    })
+                except Exception as e:
+                    logger.error(f"Error enviando comentario: {str(e)}")
+                    await self.disconnect_from_post(connection, post_id)
                 
     async def broadcast_event(self, post_id: str, event_data: dict):
         if post_id in self.active_connections:

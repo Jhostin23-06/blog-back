@@ -5,11 +5,105 @@ from app.database import db
 from app.models.post_model import Post, UserPostsResponse
 from typing import List, Optional
 from ..websocket_manager import manager  # Importa el manager de WebSocket
+from app.models.notification_model import NotificationCreate
 from datetime import datetime
 import logging
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+async def create_post_notification(
+    notification_data: dict,
+    current_user: dict,  # Esto podría estar llegando como string en lugar de dict
+    target_post_id: str
+):
+    """
+    Crea una notificación con información completa del post
+    """
+    try:
+        print(f"Buscando post para notificación: {target_post_id}")
+        
+        # DEBUG: Verificar el tipo de current_user
+        print(f"Tipo de current_user: {type(current_user)}")
+        print(f"Valor de current_user: {current_user}")
+        
+        # Si current_user es un string (ID), obtener el usuario completo
+        if isinstance(current_user, str):
+            user_id = current_user
+            current_user_data = await db.users.find_one({"_id": ObjectId(user_id)})
+            if not current_user_data:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Usuario no encontrado"
+                )
+            username = current_user_data.get("username", "Usuario")
+        else:
+            # Si ya es un diccionario, usar directamente
+            username = current_user.get("username", "Usuario")
+        
+        # Convertir post_id a ObjectId para la búsqueda
+        try:
+            post_object_id = ObjectId(target_post_id)
+            print(f"ObjectId convertido: {post_object_id}")
+        except Exception as e:
+            print(f"Error convirtiendo ObjectId: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ID de post inválido"
+            )
+        
+        # Obtener información completa del post
+        post = await db.posts.find_one({"_id": post_object_id})
+        print(f"Post encontrado en notificación: {post is not None}")
+        if not post:
+            print(f"POST NO ENCONTRADO EN NOTIFICACIÓN: {target_post_id}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Post no encontrado"
+            )
+        
+        # Obtener información del autor del post
+        post_author = await db.users.find_one({"_id": ObjectId(post["author_id"])})
+        
+        # Construir la notificación con información del post
+        notification = {
+            **notification_data,
+            # Agregar información del post
+            "post_id": target_post_id,
+            "post_title": post.get("title", ""),
+            "post_content": post.get("content", ""),
+            "post_author_id": str(post["author_id"]),
+            "post_author_username": post_author.get("username", "Usuario") if post_author else "Usuario",
+            "post_author_profile_picture": post_author.get("profile_picture", "") if post_author else "",
+            "post_image_url": post.get("image_url", ""),
+            "post_likes_count": post.get("likes_count", 0),
+            "post_comments_count": post.get("comments_count", 0),
+            "post_liked_by": post.get("liked_by", []),
+            "post_created_at": post.get("created_at", datetime.utcnow()),
+            "post_updated_at": post.get("updated_at", datetime.utcnow()),
+            # Campos requeridos
+            "emitter_username": username,  # Usar la variable username
+            "read": False,
+            "created_at": datetime.utcnow()
+        }
+        
+        # Insertar la notificación en la base de datos
+        result = await db.notifications.insert_one(notification)
+        
+        # Enviar notificación por WebSocket
+        await manager.broadcast_notification(notification_data["user_id"], notification)
+        
+        return result.inserted_id
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creando notificación: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al crear notificación"
+        )
 
 
 @router.get("/posts", response_model=List[dict])
@@ -128,6 +222,7 @@ async def get_user_posts(
             "content": post["content"],
             "author_id": str(post.get("author_id", "")),
             "author_username": user_data["username"],
+            "image_url": post.get("image_url", ""),
             "created_at": post["created_at"],
             "likes_count": post.get("likes_count", 0),
             "liked_by": liked_by,
@@ -148,9 +243,9 @@ async def get_user_posts(
     }
 
 @router.get("/posts/{post_id}", response_model=dict)
-async def get_post(post_id: str):
+async def get_post(post_id: str, current_user: Optional[dict] = Depends(optional_auth)):
     """
-    Obtiene un post específico por su ID.
+    Obtiene un post específico por su ID con información completa del autor.
     """
     try:
         post_object_id = ObjectId(post_id)
@@ -160,17 +255,65 @@ async def get_post(post_id: str):
             detail="ID de post inválido"
         )
     
-    post = await db.posts.find_one({"_id": post_object_id})
+    # Usar agregación para obtener el post con información del autor
+    pipeline = [
+        {"$match": {"_id": post_object_id}},
+        {
+            "$lookup": {
+                "from": "users",
+                "let": {"author_id_str": "$author_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$eq": [
+                                    {"$toString": "$_id"},
+                                    "$$author_id_str"
+                                ]
+                            }
+                        }
+                    }
+                ],
+                "as": "author_info"
+            }
+        },
+        {
+            "$addFields": {
+                "author_profile_picture": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$author_info.profile_picture", 0]},
+                        ""
+                    ]
+                },
+                "author_username": {
+                    "$ifNull": [
+                        {"$arrayElemAt": ["$author_info.username", 0]},
+                        ""
+                    ]
+                }
+            }
+        },
+        {"$unset": "author_info"}  # Remover el array temporal
+    ]
     
-    if not post:
+    result = await db.posts.aggregate(pipeline).to_list(1)
+    
+    if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Post no encontrado"
         )
     
+    post = result[0]
+    
     # Convertir ObjectId a string para la respuesta
-    post["id"] = str(post["_id"])
+    post["_id"] = str(post["_id"])
     post["author_id"] = str(post["author_id"])
+    
+    # Verificar likes si hay usuario autenticado
+    liked_by = [str(user) for user in post.get("liked_by", [])]
+    post["has_liked"] = current_user and str(current_user["_id"]) in liked_by
+    post["liked_by"] = liked_by
     
     return post
 
@@ -276,6 +419,11 @@ async def like_post(
             detail="ID inválido"
         )
     
+    # DEBUG: Verificar si el post existe ANTES de cualquier operación
+    print(f"Buscando post con ID: {post_id}")
+    post = await db.posts.find_one({"_id": post_object_id})
+    print(f"Post encontrado: {post is not None}")
+    
     # Verificar si el post existe
     post = await db.posts.find_one({"_id": post_object_id})
     if not post:
@@ -309,7 +457,7 @@ async def like_post(
     # Obtener el post actualizado
     updated_post = await db.posts.find_one({"_id": post_object_id})
     updated_post["_id"] = str(updated_post["_id"])
-    
+
     
     # Emitir evento WebSocket
     await manager.broadcast_event(
@@ -335,25 +483,29 @@ async def like_post(
             "created_at": datetime.now(),
             "read": False
         }
+
+        print(f"Intentando crear notificación para post: {post_id}")
+
+        await create_post_notification(notification, current_user, post_id)
         
-        try:
-            # Guardar en base de datos
-            result = await db.notifications.insert_one(notification)
-            print(result)
-            notification["_id"] = str(result.inserted_id)
+        # try:
+        #     # Guardar en base de datos
+        #     result = await db.notifications.insert_one(notification)
+        #     print(result)
+        #     notification["_id"] = str(result.inserted_id)
             
-            # Asegurarse de que el emisor tenga un username
-            emitter = await db.users.find_one({"_id": ObjectId(current_user["_id"])})
-            notification["emitter_username"] = emitter.get("username", "Usuario")
+        #     # Asegurarse de que el emisor tenga un username
+        #     emitter = await db.users.find_one({"_id": ObjectId(current_user["_id"])})
+        #     notification["emitter_username"] = emitter.get("username", "Usuario")
         
-            # Enviar por WebSocket
-            await manager.broadcast_notification(
-                str(post["author_id"]),
-                notification
-            )
-            print("Notificación enviada exitosamente")
-        except Exception as e:
-            print(f"Error al enviar notificación: {str(e)}")
+        #     # Enviar por WebSocket
+        #     await manager.broadcast_notification(
+        #         str(post["author_id"]),
+        #         notification
+        #     )
+        #     print("Notificación enviada exitosamente")
+        # except Exception as e:
+        #     print(f"Error al enviar notificación: {str(e)}")
     
     return {"message": "Like agregado exitosamente"}
 
